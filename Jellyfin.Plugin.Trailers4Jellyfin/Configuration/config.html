@@ -268,6 +268,18 @@
                                 download run, keeping the pool fresh.
                             </div>
                         </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="skip-previously-watched" />
+                                <span>Don't re-download watched trailers</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Once a watched trailer has been deleted, remember it and don't download it again.
+                                Prevents a trailer for a still-current movie from being deleted and immediately
+                                re-fetched in a loop. Trailers removed only by the disk cap stay re-downloadable.
+                            </div>
+                        </div>
                     </fieldset>
 
                     <!-- Advanced -->
@@ -347,6 +359,7 @@
                         });
                     document.getElementById('max-total-trailers').value     = config.MaxTotalTrailers ?? 50;
                     document.getElementById('delete-watched').checked       = !!config.DeleteWatchedTrailers;
+                    document.getElementById('skip-previously-watched').checked = config.SkipPreviouslyWatched !== false;
                     Dashboard.hideLoadingMsg();
                 });
             });
@@ -380,6 +393,7 @@
                     config.AllowedLanguages       = checkedLangs.length === allLangCodes.length ? '' : checkedLangs.join(',');
                     config.MaxTotalTrailers       = parseInt(document.getElementById('max-total-trailers').value, 10) ?? 50;
                     config.DeleteWatchedTrailers  = document.getElementById('delete-watched').checked;
+                    config.SkipPreviouslyWatched  = document.getElementById('skip-previously-watched').checked;
                     ApiClient.updatePluginConfiguration(pluginId, config)
                         .then(Dashboard.processPluginConfigurationUpdateResult);
                 });

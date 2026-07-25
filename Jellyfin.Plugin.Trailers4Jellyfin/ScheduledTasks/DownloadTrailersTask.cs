@@ -125,6 +125,12 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
             int downloaded = 0;
             int processed = 0;
 
+            // Trailers that were deleted after being watched: don't re-download them (they would
+            // otherwise come straight back while the movie is still in a current TMDB source).
+            var watchedBlocklist = config.SkipPreviouslyWatched
+                ? LoadWatchedBlocklist(config)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var movie in candidates)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -141,6 +147,14 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
                 if (config.SkipAlreadyDownloaded && File.Exists(outputPath))
                 {
                     _logger.LogDebug("|Trailers4Jellyfin| Already downloaded: {Path}", outputPath);
+                    continue;
+                }
+
+                if (config.SkipPreviouslyWatched && watchedBlocklist.Contains(Path.GetFileName(outputPath)))
+                {
+                    _logger.LogInformation(
+                        "|Trailers4Jellyfin| Skipping previously-watched trailer (will not re-download): {Name}",
+                        Path.GetFileName(outputPath));
                     continue;
                 }
 
@@ -240,8 +254,14 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
             var downloadFolder = config.DownloadFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
             // Build a lookup of library items by path for watched-status checks.
+            // EnableUserData ensures each item's UserData rows are loaded with the query.
             var trailerItemsByPath = _libraryManager
-                .GetItemList(new InternalItemsQuery { IncludeItemTypes = new[] { BaseItemKind.Movie }, Recursive = true })
+                .GetItemList(new InternalItemsQuery
+                {
+                    IncludeItemTypes = new[] { BaseItemKind.Movie },
+                    Recursive = true,
+                    DtoOptions = new MediaBrowser.Controller.Dto.DtoOptions { EnableUserData = true },
+                })
                 .Where(t => t.Path != null && t.Path.StartsWith(downloadFolder, StringComparison.OrdinalIgnoreCase))
                 .ToDictionary(t => t.Path!, StringComparer.OrdinalIgnoreCase);
 
@@ -256,10 +276,19 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
                 {
                     // Users property was replaced with GetUsers() in Jellyfin 10.11.10+.
                     var users = GetAllUsers();
+                    var blocklist = LoadWatchedBlocklist(config);
+                    var blocklistChanged = false;
                     foreach (var file in files.ToList())
                     {
                         if (!trailerItemsByPath.TryGetValue(file, out var item)) continue;
-                        bool watched = users.Any(u => _userDataManager.GetUserData(u, item).Played);
+
+                        // Read the UserData rows loaded by our own GetItemList query rather than
+                        // IUserDataManager.GetUserData: on Jellyfin 10.11 the latter serves a
+                        // process-lifetime cache that can hold a stale "never played" record
+                        // (created whenever some code path resolved the item without its user
+                        // data loaded), making watched trailers invisible to this task.
+                        bool watched = (item.UserData?.Any(d => d.Played) ?? false)
+                            || users.Any(u => _userDataManager.GetUserData(u, item)?.Played ?? false);
                         if (!watched) continue;
 
                         _logger.LogInformation("|Trailers4Jellyfin| Deleting watched trailer: {File}", Path.GetFileName(file));
@@ -267,7 +296,15 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
                         var sidecar = Path.ChangeExtension(file, ".json");
                         if (File.Exists(sidecar)) File.Delete(sidecar);
                         files.Remove(file);
+
+                        // Remember this trailer so the download loop doesn't immediately re-fetch it
+                        // from a still-current TMDB source. Only watched-deletions are recorded.
+                        if (blocklist.Add(Path.GetFileName(file)))
+                            blocklistChanged = true;
                     }
+
+                    if (blocklistChanged)
+                        SaveWatchedBlocklist(config, blocklist);
                 }
                 catch (MissingMethodException ex)
                 {
@@ -298,6 +335,43 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
             var safeName = string.Concat(title.Split(Path.GetInvalidFileNameChars())).Trim();
             var yearPart = year.HasValue ? $" ({year.Value})" : string.Empty;
             return Path.Combine(config.DownloadFolder, $"{safeName}{yearPart}.mp4");
+        }
+
+        // Persistent record of trailer filenames that were deleted after being watched, so they are
+        // not re-downloaded on later runs. Stored as a hidden file inside the download folder (which
+        // is stable across restarts/updates); Jellyfin's library scan ignores dot-files and the
+        // cleanup pass only globs *.mp4, so it is never treated as media.
+        private static string BlocklistPath(Configuration.PluginConfiguration config)
+            => Path.Combine(config.DownloadFolder, ".t4j-watched.json");
+
+        private HashSet<string> LoadWatchedBlocklist(Configuration.PluginConfiguration config)
+        {
+            try
+            {
+                var path = BlocklistPath(config);
+                if (!File.Exists(path))
+                    return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                var names = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
+                return new HashSet<string>(names ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "|Trailers4Jellyfin| Could not read watched-trailer blocklist; treating as empty.");
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private void SaveWatchedBlocklist(Configuration.PluginConfiguration config, HashSet<string> names)
+        {
+            try
+            {
+                File.WriteAllText(BlocklistPath(config), JsonSerializer.Serialize(names.ToList()));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "|Trailers4Jellyfin| Could not persist watched-trailer blocklist.");
+            }
         }
     }
 }

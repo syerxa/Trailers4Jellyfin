@@ -51,6 +51,14 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.Configuration
         /// <summary>Delete trailers that any user has already watched, making room for fresh ones.</summary>
         public bool DeleteWatchedTrailers { get; set; } = false;
 
+        /// <summary>
+        /// Once a watched trailer has been deleted, do not download it again on later runs.
+        /// Without this, a trailer for a still-current/upcoming movie is deleted as watched and
+        /// then immediately re-downloaded from the same TMDB source, looping forever. Only
+        /// watched-deletions are remembered; trailers removed by the disk cap remain re-downloadable.
+        /// </summary>
+        public bool SkipPreviouslyWatched { get; set; } = true;
+
         // ── Advanced ──────────────────────────────────────────────────────────
 
         /// <summary>

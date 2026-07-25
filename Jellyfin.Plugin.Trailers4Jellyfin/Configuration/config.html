@@ -81,6 +81,19 @@
                                 Falls back to random trailers if not enough genre matches are found.
                             </div>
                         </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="strict-rating-limit" />
+                                <span>Strict rating limit</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Only play a pre-roll whose content rating is at or below the movie being played.
+                                Trailers with a blank or unrecognised rating are treated as Adult and excluded, so a
+                                fresh unrated trailer never plays before a kids' movie. If nothing qualifies, no
+                                pre-roll plays. Turn off to allow unrated trailers (not recommended for family use).
+                            </div>
+                        </div>
                     </fieldset>
 
                     <!-- Languages -->
@@ -338,6 +351,7 @@
                     document.getElementById('enable-cinema-mode').checked   = config.EnableCinemaMode !== false;
                     document.getElementById('num-trailers').value           = config.NumberOfTrailers ?? 2;
                     document.getElementById('enable-genre-matching').checked = config.EnableGenreMatching !== false;
+                    document.getElementById('strict-rating-limit').checked  = config.StrictRatingLimit !== false;
                     document.getElementById('source-now-playing').checked   = config.SourceNowPlaying !== false;
                     document.getElementById('source-upcoming').checked      = config.SourceUpcoming !== false;
                     document.getElementById('source-popular').checked       = !!config.SourcePopular;
@@ -371,6 +385,7 @@
                     config.EnableCinemaMode       = document.getElementById('enable-cinema-mode').checked;
                     config.NumberOfTrailers       = parseInt(document.getElementById('num-trailers').value, 10) || 2;
                     config.EnableGenreMatching    = document.getElementById('enable-genre-matching').checked;
+                    config.StrictRatingLimit      = document.getElementById('strict-rating-limit').checked;
                     config.SourceNowPlaying       = document.getElementById('source-now-playing').checked;
                     config.SourceUpcoming         = document.getElementById('source-upcoming').checked;
                     config.SourcePopular          = document.getElementById('source-popular').checked;

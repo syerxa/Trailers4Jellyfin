@@ -38,6 +38,14 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.Configuration
         public int NumberOfTrailers { get; set; } = 2;
         public bool EnableGenreMatching { get; set; } = true;
 
+        /// <summary>
+        /// Only play a pre-roll trailer whose content rating is known to be at or below the rating of
+        /// the movie being played. Trailers with a blank or unrecognised rating are treated as Adult
+        /// (most mature) and excluded — a fresh YouTube trailer with no rating will NOT play before a
+        /// kids' movie. If nothing qualifies, no pre-roll plays (no fall-back to unrated trailers).
+        /// </summary>
+        public bool StrictRatingLimit { get; set; } = true;
+
         // ── Languages ─────────────────────────────────────────────────────────
 
         /// <summary>Comma-separated ISO 639-1 codes. Empty = all languages allowed.</summary>

@@ -269,46 +269,55 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
                 .Where(f => !Path.GetFileName(f).StartsWith("._", StringComparison.Ordinal))
                 .ToList();
 
-            // Delete watched trailers first.
-            if (config.DeleteWatchedTrailers)
+            // Users property was replaced with GetUsers() in Jellyfin 10.11.10+.
+            IList<User>? users = null;
+            try
             {
-                try
+                users = GetAllUsers();
+            }
+            catch (MissingMethodException ex)
+            {
+                _logger.LogWarning(ex, "|Trailers4Jellyfin| Cannot enumerate users in this Jellyfin version — DeleteWatchedTrailers skipped, deleted trailers' play state not reset.");
+            }
+
+            // Delete watched trailers first.
+            if (config.DeleteWatchedTrailers && users != null)
+            {
+                var watchedFiles = new List<string>();
+                foreach (var file in files)
                 {
-                    // Users property was replaced with GetUsers() in Jellyfin 10.11.10+.
-                    var users = GetAllUsers();
-                    var blocklist = LoadWatchedBlocklist(config);
-                    var blocklistChanged = false;
-                    foreach (var file in files.ToList())
-                    {
-                        if (!trailerItemsByPath.TryGetValue(file, out var item)) continue;
+                    if (!trailerItemsByPath.TryGetValue(file, out var item)) continue;
 
-                        // Read the UserData rows loaded by our own GetItemList query rather than
-                        // IUserDataManager.GetUserData: on Jellyfin 10.11 the latter serves a
-                        // process-lifetime cache that can hold a stale "never played" record
-                        // (created whenever some code path resolved the item without its user
-                        // data loaded), making watched trailers invisible to this task.
-                        bool watched = (item.UserData?.Any(d => d.Played) ?? false)
-                            || users.Any(u => _userDataManager.GetUserData(u, item)?.Played ?? false);
-                        if (!watched) continue;
-
-                        _logger.LogInformation("|Trailers4Jellyfin| Deleting watched trailer: {File}", Path.GetFileName(file));
-                        File.Delete(file);
-                        var sidecar = Path.ChangeExtension(file, ".json");
-                        if (File.Exists(sidecar)) File.Delete(sidecar);
-                        files.Remove(file);
-
-                        // Remember this trailer so the download loop doesn't immediately re-fetch it
-                        // from a still-current TMDB source. Only watched-deletions are recorded.
-                        if (blocklist.Add(Path.GetFileName(file)))
-                            blocklistChanged = true;
-                    }
-
-                    if (blocklistChanged)
-                        SaveWatchedBlocklist(config, blocklist);
+                    // Read the UserData rows loaded by our own GetItemList query rather than
+                    // IUserDataManager.GetUserData: on Jellyfin 10.11 the latter serves a
+                    // process-lifetime cache that can hold a stale "never played" record
+                    // (created whenever some code path resolved the item without its user
+                    // data loaded), making watched trailers invisible to this task.
+                    bool watched = (item.UserData?.Any(d => d.Played) ?? false)
+                        || users.Any(u => _userDataManager.GetUserData(u, item)?.Played ?? false);
+                    if (watched) watchedFiles.Add(file);
                 }
-                catch (MissingMethodException ex)
+
+                // Remember these trailers so the download loop doesn't immediately re-fetch them
+                // from a still-current TMDB source. Only watched-deletions are recorded. The list is
+                // saved BEFORE deleting: if it can't be written, keep the files and retry next run
+                // rather than delete trailers that would come straight back.
+                var blocklist = LoadWatchedBlocklist(config);
+                var blocklistChanged = false;
+                foreach (var file in watchedFiles)
                 {
-                    _logger.LogWarning(ex, "|Trailers4Jellyfin| Cannot enumerate users in this Jellyfin version — DeleteWatchedTrailers skipped.");
+                    if (blocklist.Add(Path.GetFileName(file)))
+                        blocklistChanged = true;
+                }
+
+                if (!blocklistChanged || SaveWatchedBlocklist(config, blocklist))
+                {
+                    foreach (var file in watchedFiles)
+                    {
+                        _logger.LogInformation("|Trailers4Jellyfin| Deleting watched trailer: {File}", Path.GetFileName(file));
+                        DeleteTrailer(file, trailerItemsByPath[file], users);
+                        files.Remove(file);
+                    }
                 }
             }
 
@@ -323,9 +332,44 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
                 foreach (var file in toDelete)
                 {
                     _logger.LogInformation("|Trailers4Jellyfin| Deleting oldest trailer to stay under cap: {File}", Path.GetFileName(file));
-                    File.Delete(file);
-                    var sidecar = Path.ChangeExtension(file, ".json");
-                    if (File.Exists(sidecar)) File.Delete(sidecar);
+                    DeleteTrailer(file, trailerItemsByPath.GetValueOrDefault(file), users);
+                }
+            }
+        }
+
+        private void DeleteTrailer(string file, BaseItem? item, IList<User>? users)
+        {
+            if (item != null && users != null)
+                ResetPlayState(item, users);
+
+            File.Delete(file);
+            var sidecar = Path.ChangeExtension(file, ".json");
+            if (File.Exists(sidecar)) File.Delete(sidecar);
+        }
+
+        // A trailer is identified as the movie it advertises, so it carries that movie's TMDB/IMDb
+        // ids, and Jellyfin keys play state by those ids. When a file is deleted, Jellyfin parks its
+        // play state and re-attaches it to the next item with the same ids — so without this reset,
+        // a trailer watched as a pre-roll makes the real movie show as watched (or with a resume
+        // point) once it is imported. Only users with play state are touched: MarkUnplayed writes
+        // rows, and calling it for everyone would leave an empty record per user behind.
+        private void ResetPlayState(BaseItem item, IList<User> users)
+        {
+            foreach (var user in users)
+            {
+                var cached = _userDataManager.GetUserData(user, item);
+                bool hasState = (item.UserData?.Any(d => d.UserId.Equals(user.Id)
+                        && (d.Played || d.PlayCount > 0 || d.PlaybackPositionTicks > 0)) ?? false)
+                    || (cached != null && (cached.Played || cached.PlayCount > 0 || cached.PlaybackPositionTicks > 0));
+                if (!hasState) continue;
+
+                try
+                {
+                    item.MarkUnplayed(user);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "|Trailers4Jellyfin| Could not reset play state of '{Name}' for {User}; the movie may show as watched when imported.", item.Name, user.Username);
                 }
             }
         }
@@ -362,15 +406,17 @@ namespace Jellyfin.Plugin.Trailers4Jellyfin.ScheduledTasks
             }
         }
 
-        private void SaveWatchedBlocklist(Configuration.PluginConfiguration config, HashSet<string> names)
+        private bool SaveWatchedBlocklist(Configuration.PluginConfiguration config, HashSet<string> names)
         {
             try
             {
                 File.WriteAllText(BlocklistPath(config), JsonSerializer.Serialize(names.ToList()));
+                return true;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "|Trailers4Jellyfin| Could not persist watched-trailer blocklist.");
+                _logger.LogWarning(ex, "|Trailers4Jellyfin| Could not persist watched-trailer blocklist; keeping watched trailers until it can be saved.");
+                return false;
             }
         }
     }
